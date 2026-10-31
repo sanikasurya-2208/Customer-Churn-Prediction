@@ -2,9 +2,109 @@
 import streamlit as st
 import pandas as pd
 import joblib
+import mysql.connector
+import uuid
 
 # Load trained model
 model = joblib.load("Trained Model/customer_churn_model.pkl")
+
+
+# MySQL database connection
+def get_connection():
+    return mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password=st.secrets["mysql"]["password"],
+        database="customer_churn_db"
+    )
+
+
+# Save customer and prediction in MySQL
+def save_prediction(customer_data, prediction, probability, result):
+
+    customer_id = "APP" + uuid.uuid4().hex[:12]
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    try:
+        customer = customer_data.iloc[0]
+
+        # Save customer details
+        customer_query = """
+        INSERT INTO Customers (
+            customerID, gender, SeniorCitizen, Partner,
+            Dependents, tenure, PhoneService, MultipleLines,
+            InternetService, OnlineSecurity, OnlineBackup,
+            DeviceProtection, TechSupport, StreamingTV,
+            StreamingMovies, Contract, PaperlessBilling,
+            PaymentMethod, MonthlyCharges, TotalCharges, Churn
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """
+
+        customer_values = (
+            customer_id,
+            customer["gender"],
+            int(customer["SeniorCitizen"]),
+            customer["Partner"],
+            customer["Dependents"],
+            int(customer["tenure"]),
+            customer["PhoneService"],
+            customer["MultipleLines"],
+            customer["InternetService"],
+            customer["OnlineSecurity"],
+            customer["OnlineBackup"],
+            customer["DeviceProtection"],
+            customer["TechSupport"],
+            customer["StreamingTV"],
+            customer["StreamingMovies"],
+            customer["Contract"],
+            customer["PaperlessBilling"],
+            customer["PaymentMethod"],
+            float(customer["MonthlyCharges"]),
+            float(customer["TotalCharges"]),
+            result
+        )
+
+        cursor.execute(customer_query, customer_values)
+
+        # Save prediction details
+        prediction_query = """
+        INSERT INTO Predictions (
+            customerID,
+            predicted_churn,
+            churn_probability,
+            model_name
+        )
+        VALUES (%s, %s, %s, %s)
+        """
+
+        cursor.execute(
+            prediction_query,
+            (
+                customer_id,
+                result,
+                float(probability),
+                "Tuned Random Forest Classifier"
+            )
+        )
+
+        connection.commit()
+
+        return customer_id
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        connection.close()
+
 
 # Page configuration
 st.set_page_config(
@@ -17,6 +117,7 @@ st.set_page_config(
 st.sidebar.title("Customer Churn")
 st.sidebar.write("Machine Learning Project")
 st.sidebar.divider()
+
 st.sidebar.info(
     "This application predicts whether a customer "
     "is likely to leave a service."
@@ -38,12 +139,11 @@ with col1:
     senior_citizen = st.selectbox("Senior Citizen", [0, 1])
     partner = st.selectbox("Partner", ["Yes", "No"])
     dependents = st.selectbox("Dependents", ["Yes", "No"])
-    tenure = st.number_input(
-        "Tenure (months)", 0, 72, 12
-    )
+    tenure = st.number_input("Tenure (months)", 0, 72, 12)
     phone_service = st.selectbox("Phone Service", ["Yes", "No"])
     multiple_lines = st.selectbox(
-        "Multiple Lines", ["No", "Yes", "No phone service"]
+        "Multiple Lines",
+        ["No", "Yes", "No phone service"]
     )
 
 with col2:
@@ -125,6 +225,8 @@ if st.button("Predict Customer Churn", type="primary"):
     prediction = model.predict(customer_data)
     probability = model.predict_proba(customer_data)[0][1]
 
+    result = "Yes" if prediction[0] == 1 else "No"
+
     st.subheader("Prediction Result")
 
     metric_col1, metric_col2 = st.columns(2)
@@ -136,12 +238,15 @@ if st.button("Predict Customer Churn", type="primary"):
         )
 
     with metric_col2:
-        result = "Likely to Leave" if prediction[0] == 1 else "Likely to Stay"
-        st.metric("Prediction", result)
+        display_result = (
+            "Likely to Leave" if result == "Yes"
+            else "Likely to Stay"
+        )
+        st.metric("Prediction", display_result)
 
     st.progress(float(probability))
 
-    if prediction[0] == 1:
+    if result == "Yes":
         st.error("Customer is likely to leave the service.")
     else:
         st.success("Customer is likely to stay with the service.")
@@ -149,8 +254,25 @@ if st.button("Predict Customer Churn", type="primary"):
     st.caption(
         "Probability is the model's estimated likelihood of churn."
     )
+
+    # Save prediction to MySQL
+    try:
+        customer_id = save_prediction(
+            customer_data,
+            prediction,
+            probability,
+            result
+        )
+
+        st.success("Prediction saved successfully in MySQL!")
+        st.write("Customer ID:", customer_id)
+
+    except Exception as error:
+        st.error(f"Prediction generated, but database saving failed: {error}")
+
 st.divider()
 
+# Model performance
 st.header("Model Performance")
 
 col1, col2, col3, col4 = st.columns(4)
@@ -161,6 +283,6 @@ col3.metric("Recall", "74.87%")
 col4.metric("F1 Score", "61.47%")
 
 st.caption("Model: Tuned Random Forest Classifier")
-# Footer
+
 st.divider()
 st.caption("Customer Churn Prediction | Machine Learning Project")
